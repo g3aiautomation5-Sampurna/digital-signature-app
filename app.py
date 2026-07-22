@@ -118,56 +118,80 @@ def is_ods_file(file_path):
     return os.path.splitext(str(file_path))[1].lower() == ".ods"
 
 
+def sanitize_color(color_str):
+    if not color_str:
+        return None
+    color_str = str(color_str).lstrip("#").strip().upper()
+    if color_str in ("TRANSPARENT", "NONE", ""):
+        return None
+    if len(color_str) == 3:
+        color_str = "".join(c * 2 for c in color_str)
+    if len(color_str) in (6, 8) and all(c in "0123456789ABCDEF" for c in color_str):
+        return color_str
+    return None
+
+
+def sanitize_sheet_name(name, existing_names):
+    if not name:
+        name = "Sheet"
+    for ch in [":", "\\", "/", "?", "*", "[", "]"]:
+        name = name.replace(ch, "_")
+    name = name[:31].strip()
+    if not name:
+        name = "Sheet"
+
+    base_name = name
+    counter = 1
+    while name in existing_names:
+        suffix = f"_{counter}"
+        name = base_name[: 31 - len(suffix)] + suffix
+        counter += 1
+
+    existing_names.add(name)
+    return name
+
+
 def get_ods_cell_text(cell):
+    try:
+        text = teletype.extractText(cell)
+        if text is not None:
+            text = text.strip()
+        if text:
+            return text
+    except Exception:
+        pass
 
-    text = teletype.extractText(cell)
-
-    if text is not None:
-        text = text.strip()
-
-    if text:
-        return text
-
-    value = cell.getAttribute("value")
-
-    if value is not None:
-        return str(value)
+    for attr in ["value", "stringvalue", "datevalue", "booleanvalue"]:
+        try:
+            val = cell.getAttribute(attr)
+            if val is not None and str(val).strip() != "":
+                return str(val).strip()
+        except Exception:
+            pass
 
     return ""
 
 
 def load_ods_data(file_path):
-
     doc = load_ods(file_path)
-
     data = {}
 
     for table in doc.spreadsheet.getElementsByType(Table):
-
         sheet_name = table.getAttribute("name")
-
         rows = []
 
         for row in table.getElementsByType(TableRow):
-
             values = []
-
             for cell in row.getElementsByType(TableCell):
-
-                # Handle repeated columns
                 repeat = cell.getAttribute("numbercolumnsrepeated")
                 repeat = int(repeat) if repeat else 1
-
                 cell_value = get_ods_cell_text(cell)
-
                 for _ in range(repeat):
                     values.append(cell_value)
 
-            # Remove unnecessary trailing empty cells
             while values and values[-1] == "":
                 values.pop()
 
-            # Handle repeated rows
             row_repeat = row.getAttribute("numberrowsrepeated")
             row_repeat = int(row_repeat) if row_repeat else 1
 
@@ -287,7 +311,7 @@ def convert_ods_to_xlsx(input_path, output_path):
         return
     except Exception as exc:
         raise RuntimeError(
-            "Unable to convert ODS file to XLSX."
+            f"Unable to convert ODS file to XLSX: {exc}"
         ) from exc
 
 
@@ -357,6 +381,8 @@ def _convert_with_python(input_path, output_path):
     wb = Workbook()
     wb.remove(wb.active)
 
+    existing_sheet_names = set()
+
     thin_border = Border(
         left=Side(style="thin", color="D0D0D0"),
         right=Side(style="thin", color="D0D0D0"),
@@ -365,7 +391,8 @@ def _convert_with_python(input_path, output_path):
     )
 
     for table in doc.spreadsheet.getElementsByType(Table):
-        sheet_name = table.getAttribute("name")
+        raw_name = table.getAttribute("name")
+        sheet_name = sanitize_sheet_name(raw_name, existing_sheet_names)
         ws = wb.create_sheet(sheet_name)
 
         row_idx = 1
@@ -400,32 +427,41 @@ def _convert_with_python(input_path, output_path):
                     c = ws.cell(row=row_idx, column=col_idx)
                     c.value = val
 
-                    bg = st_info.get("bg_color")
-                    if bg:
-                        c.fill = PatternFill(
-                            start_color=bg,
-                            end_color=bg,
-                            fill_type="solid"
-                        )
+                    try:
+                        bg = sanitize_color(st_info.get("bg_color"))
+                        if bg:
+                            c.fill = PatternFill(
+                                start_color=bg,
+                                end_color=bg,
+                                fill_type="solid"
+                            )
 
-                    is_bold = st_info.get("bold", False)
-                    font_color = st_info.get("color")
-                    if is_bold or font_color:
-                        c.font = Font(
-                            bold=is_bold,
-                            color=font_color if font_color else "000000"
-                        )
+                        is_bold = st_info.get("bold", False)
+                        font_color = sanitize_color(st_info.get("color"))
+                        if is_bold or font_color:
+                            c.font = Font(
+                                bold=is_bold,
+                                color=font_color if font_color else "000000"
+                            )
 
-                    align = st_info.get("align")
-                    if align:
-                        c.alignment = Alignment(horizontal=align)
+                        align = st_info.get("align")
+                        if align in ("left", "center", "right", "justify"):
+                            c.alignment = Alignment(horizontal=align)
 
-                    if st_info.get("border"):
-                        c.border = thin_border
+                        if st_info.get("border"):
+                            c.border = thin_border
+                    except Exception:
+                        pass
 
                 row_idx += 1
 
-        auto_fit_column_widths(ws)
+        try:
+            auto_fit_column_widths(ws)
+        except Exception:
+            pass
+
+    if len(wb.sheetnames) == 0:
+        wb.create_sheet("Sheet1")
 
     wb.save(output_path)
 
