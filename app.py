@@ -118,6 +118,20 @@ def is_ods_file(file_path):
     return os.path.splitext(str(file_path))[1].lower() == ".ods"
 
 
+def safe_get_attribute(elem, attr_name):
+    if not hasattr(elem, "allowed_attributes"):
+        return None
+    try:
+        allowed = elem.allowed_attributes()
+        if allowed:
+            allowed_args = [a[1].lower().replace("-", "") for a in allowed]
+            if attr_name.lower().replace("-", "") not in allowed_args:
+                return None
+        return elem.getAttribute(attr_name)
+    except Exception:
+        return None
+
+
 def sanitize_color(color_str):
     if not color_str:
         return None
@@ -162,12 +176,9 @@ def get_ods_cell_text(cell):
         pass
 
     for attr in ["value", "stringvalue", "datevalue", "booleanvalue"]:
-        try:
-            val = cell.getAttribute(attr)
-            if val is not None and str(val).strip() != "":
-                return str(val).strip()
-        except Exception:
-            pass
+        val = safe_get_attribute(cell, attr)
+        if val is not None and str(val).strip() != "":
+            return str(val).strip()
 
     return ""
 
@@ -177,14 +188,14 @@ def load_ods_data(file_path):
     data = {}
 
     for table in doc.spreadsheet.getElementsByType(Table):
-        sheet_name = table.getAttribute("name")
+        sheet_name = safe_get_attribute(table, "name") or "Sheet"
         rows = []
 
         for row in table.getElementsByType(TableRow):
             values = []
             for cell in row.getElementsByType(TableCell):
-                repeat = cell.getAttribute("numbercolumnsrepeated")
-                repeat = int(repeat) if repeat else 1
+                repeat_str = safe_get_attribute(cell, "numbercolumnsrepeated")
+                repeat = int(repeat_str) if repeat_str else 1
                 cell_value = get_ods_cell_text(cell)
                 for _ in range(repeat):
                     values.append(cell_value)
@@ -192,8 +203,8 @@ def load_ods_data(file_path):
             while values and values[-1] == "":
                 values.pop()
 
-            row_repeat = row.getAttribute("numberrowsrepeated")
-            row_repeat = int(row_repeat) if row_repeat else 1
+            row_repeat_str = safe_get_attribute(row, "numberrowsrepeated")
+            row_repeat = int(row_repeat_str) if row_repeat_str else 1
 
             for _ in range(row_repeat):
                 rows.append(values.copy())
@@ -344,9 +355,7 @@ def parse_odf_styles(doc):
         sources.extend(list(doc.styles.childNodes))
 
     for s in sources:
-        if not hasattr(s, "getAttribute"):
-            continue
-        name = s.getAttribute("name")
+        name = safe_get_attribute(s, "name")
         if not name:
             continue
         style_info = {
@@ -356,20 +365,21 @@ def parse_odf_styles(doc):
             "color": None,
             "border": False
         }
-        for child in s.childNodes:
-            if not hasattr(child, "attributes"):
-                continue
-            for (ns, attr), val in child.attributes.items():
-                if attr == "background-color" and val != "transparent":
-                    style_info["bg_color"] = val.lstrip("#").upper()
-                elif attr == "font-weight" and val in ("bold", "700", "800", "900"):
-                    style_info["bold"] = True
-                elif attr == "text-align":
-                    style_info["align"] = val
-                elif attr == "color":
-                    style_info["color"] = val.lstrip("#").upper()
-                elif "border" in attr and val != "none":
-                    style_info["border"] = True
+        if hasattr(s, "childNodes"):
+            for child in s.childNodes:
+                if not hasattr(child, "attributes"):
+                    continue
+                for (ns, attr), val in child.attributes.items():
+                    if attr == "background-color" and val != "transparent":
+                        style_info["bg_color"] = val.lstrip("#").upper()
+                    elif attr == "font-weight" and val in ("bold", "700", "800", "900"):
+                        style_info["bold"] = True
+                    elif attr == "text-align":
+                        style_info["align"] = val
+                    elif attr == "color":
+                        style_info["color"] = val.lstrip("#").upper()
+                    elif "border" in attr and val != "none":
+                        style_info["border"] = True
         styles[name] = style_info
     return styles
 
@@ -379,9 +389,8 @@ def _convert_with_python(input_path, output_path):
     styles = parse_odf_styles(doc)
 
     wb = Workbook()
-    wb.remove(wb.active)
-
     existing_sheet_names = set()
+    first_sheet = True
 
     thin_border = Border(
         left=Side(style="thin", color="D0D0D0"),
@@ -391,25 +400,30 @@ def _convert_with_python(input_path, output_path):
     )
 
     for table in doc.spreadsheet.getElementsByType(Table):
-        raw_name = table.getAttribute("name")
+        raw_name = safe_get_attribute(table, "name")
         sheet_name = sanitize_sheet_name(raw_name, existing_sheet_names)
-        ws = wb.create_sheet(sheet_name)
+        if first_sheet:
+            ws = wb.active
+            ws.title = sheet_name
+            first_sheet = False
+        else:
+            ws = wb.create_sheet(sheet_name)
 
         row_idx = 1
         for row in table.getElementsByType(TableRow):
-            row_repeat = row.getAttribute("numberrowsrepeated")
-            row_repeat = int(row_repeat) if row_repeat else 1
+            row_repeat_str = safe_get_attribute(row, "numberrowsrepeated")
+            row_repeat = int(row_repeat_str) if row_repeat_str else 1
 
             cells_data = []
             has_row_data = False
 
             for cell in row.getElementsByType(TableCell):
-                repeat = cell.getAttribute("numbercolumnsrepeated")
-                repeat = int(repeat) if repeat else 1
+                repeat_str = safe_get_attribute(cell, "numbercolumnsrepeated")
+                repeat = int(repeat_str) if repeat_str else 1
 
                 cell_value = get_ods_cell_text(cell)
-                style_name = cell.getAttribute("stylename")
-                style_info = styles.get(style_name, {})
+                style_name = safe_get_attribute(cell, "stylename")
+                style_info = styles.get(style_name, {}) if style_name else {}
 
                 for _ in range(repeat):
                     cells_data.append((cell_value, style_info))
