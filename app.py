@@ -193,12 +193,15 @@ def load_ods_data(file_path):
 
         for row in table.getElementsByType(TableRow):
             values = []
-            for cell in row.getElementsByType(TableCell):
-                repeat_str = safe_get_attribute(cell, "numbercolumnsrepeated")
-                repeat = int(repeat_str) if repeat_str else 1
-                cell_value = get_ods_cell_text(cell)
-                for _ in range(repeat):
-                    values.append(cell_value)
+            if hasattr(row, "childNodes"):
+                for child in row.childNodes:
+                    tag = getattr(child, "tagName", "")
+                    if tag in ("table:table-cell", "table:covered-table-cell"):
+                        repeat_str = safe_get_attribute(child, "numbercolumnsrepeated")
+                        repeat = int(repeat_str) if repeat_str else 1
+                        cell_value = get_ods_cell_text(child) if tag == "table:table-cell" else ""
+                        for _ in range(repeat):
+                            values.append(cell_value)
 
             while values and values[-1] == "":
                 values.pop()
@@ -417,18 +420,25 @@ def _convert_with_python(input_path, output_path):
             cells_data = []
             has_row_data = False
 
-            for cell in row.getElementsByType(TableCell):
-                repeat_str = safe_get_attribute(cell, "numbercolumnsrepeated")
-                repeat = int(repeat_str) if repeat_str else 1
+            if hasattr(row, "childNodes"):
+                for child in row.childNodes:
+                    tag = getattr(child, "tagName", "")
+                    if tag in ("table:table-cell", "table:covered-table-cell"):
+                        repeat_str = safe_get_attribute(child, "numbercolumnsrepeated")
+                        repeat = int(repeat_str) if repeat_str else 1
 
-                cell_value = get_ods_cell_text(cell)
-                style_name = safe_get_attribute(cell, "stylename")
-                style_info = styles.get(style_name, {}) if style_name else {}
+                        if tag == "table:table-cell":
+                            cell_value = get_ods_cell_text(child)
+                            style_name = safe_get_attribute(child, "stylename")
+                            style_info = styles.get(style_name, {}) if style_name else {}
+                        else:
+                            cell_value = ""
+                            style_info = {}
 
-                for _ in range(repeat):
-                    cells_data.append((cell_value, style_info))
-                    if cell_value != "":
-                        has_row_data = True
+                        for _ in range(repeat):
+                            cells_data.append((cell_value, style_info))
+                            if cell_value != "":
+                                has_row_data = True
 
             while cells_data and cells_data[-1][0] == "":
                 cells_data.pop()
