@@ -19,6 +19,8 @@ import shutil
 from datetime import datetime
 
 from openpyxl import cell, load_workbook, Workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 from odf.opendocument import load as load_ods
 from odf.table import Table, TableRow, TableCell
 from odf.text import P
@@ -289,16 +291,141 @@ def convert_ods_to_xlsx(input_path, output_path):
         ) from exc
 
 
+def auto_fit_column_widths(ws, min_width=12, padding=4):
+    for col in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col[0].column)
+        for cell in col:
+            val = str(cell.value or "")
+            if "\n" in val:
+                lines = val.split("\n")
+                line_len = max(len(l) for l in lines) if lines else 0
+            else:
+                line_len = len(val)
+            if line_len > max_len:
+                max_len = line_len
+        if max_len > 0:
+            current_w = ws.column_dimensions[col_letter].width
+            calculated_w = max(max_len + padding, min_width)
+            if not current_w or calculated_w > current_w:
+                ws.column_dimensions[col_letter].width = calculated_w
+
+
+def parse_odf_styles(doc):
+    styles = {}
+    sources = []
+    if hasattr(doc, "automaticstyles") and doc.automaticstyles:
+        sources.extend(list(doc.automaticstyles.childNodes))
+    if hasattr(doc, "styles") and doc.styles:
+        sources.extend(list(doc.styles.childNodes))
+
+    for s in sources:
+        if not hasattr(s, "getAttribute"):
+            continue
+        name = s.getAttribute("name")
+        if not name:
+            continue
+        style_info = {
+            "bg_color": None,
+            "bold": False,
+            "align": None,
+            "color": None,
+            "border": False
+        }
+        for child in s.childNodes:
+            if not hasattr(child, "attributes"):
+                continue
+            for (ns, attr), val in child.attributes.items():
+                if attr == "background-color" and val != "transparent":
+                    style_info["bg_color"] = val.lstrip("#").upper()
+                elif attr == "font-weight" and val in ("bold", "700", "800", "900"):
+                    style_info["bold"] = True
+                elif attr == "text-align":
+                    style_info["align"] = val
+                elif attr == "color":
+                    style_info["color"] = val.lstrip("#").upper()
+                elif "border" in attr and val != "none":
+                    style_info["border"] = True
+        styles[name] = style_info
+    return styles
+
+
 def _convert_with_python(input_path, output_path):
-    data = load_ods_data(input_path)
+    doc = load_ods(input_path)
+    styles = parse_odf_styles(doc)
+
     wb = Workbook()
     wb.remove(wb.active)
 
-    for sheet_name, rows in data.items():
+    thin_border = Border(
+        left=Side(style="thin", color="D0D0D0"),
+        right=Side(style="thin", color="D0D0D0"),
+        top=Side(style="thin", color="D0D0D0"),
+        bottom=Side(style="thin", color="D0D0D0")
+    )
+
+    for table in doc.spreadsheet.getElementsByType(Table):
+        sheet_name = table.getAttribute("name")
         ws = wb.create_sheet(sheet_name)
-        for row_idx, row in enumerate(rows, 1):
-            for col_idx, value in enumerate(row, 1):
-                ws.cell(row=row_idx, column=col_idx).value = value
+
+        row_idx = 1
+        for row in table.getElementsByType(TableRow):
+            row_repeat = row.getAttribute("numberrowsrepeated")
+            row_repeat = int(row_repeat) if row_repeat else 1
+
+            cells_data = []
+            has_row_data = False
+
+            for cell in row.getElementsByType(TableCell):
+                repeat = cell.getAttribute("numbercolumnsrepeated")
+                repeat = int(repeat) if repeat else 1
+
+                cell_value = get_ods_cell_text(cell)
+                style_name = cell.getAttribute("stylename")
+                style_info = styles.get(style_name, {})
+
+                for _ in range(repeat):
+                    cells_data.append((cell_value, style_info))
+                    if cell_value != "":
+                        has_row_data = True
+
+            while cells_data and cells_data[-1][0] == "":
+                cells_data.pop()
+
+            if not has_row_data and row_idx > 1 and row_repeat > 5:
+                break
+
+            for _ in range(row_repeat):
+                for col_idx, (val, st_info) in enumerate(cells_data, 1):
+                    c = ws.cell(row=row_idx, column=col_idx)
+                    c.value = val
+
+                    bg = st_info.get("bg_color")
+                    if bg:
+                        c.fill = PatternFill(
+                            start_color=bg,
+                            end_color=bg,
+                            fill_type="solid"
+                        )
+
+                    is_bold = st_info.get("bold", False)
+                    font_color = st_info.get("color")
+                    if is_bold or font_color:
+                        c.font = Font(
+                            bold=is_bold,
+                            color=font_color if font_color else "000000"
+                        )
+
+                    align = st_info.get("align")
+                    if align:
+                        c.alignment = Alignment(horizontal=align)
+
+                    if st_info.get("border"):
+                        c.border = thin_border
+
+                row_idx += 1
+
+        auto_fit_column_widths(ws)
 
     wb.save(output_path)
 
@@ -403,6 +530,9 @@ def store_signature(
         f"Approved by {approver_name} "
         f"on {current_date}"
     )
+
+    for sheet in wb.worksheets:
+        auto_fit_column_widths(sheet)
 
     wb.save(file_path)
 
