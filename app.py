@@ -329,7 +329,15 @@ def convert_ods_to_xlsx(input_path, output_path):
         ) from exc
 
 
-def auto_fit_column_widths(ws, min_width=12, padding=4):
+def format_worksheet_layout(ws):
+    thin_border = Border(
+        left=Side(style="thin", color="D0D0D0"),
+        right=Side(style="thin", color="D0D0D0"),
+        top=Side(style="thin", color="D0D0D0"),
+        bottom=Side(style="thin", color="D0D0D0")
+    )
+
+    # First pass: set column widths
     for col in ws.columns:
         max_len = 0
         col_letter = get_column_letter(col[0].column)
@@ -343,10 +351,45 @@ def auto_fit_column_widths(ws, min_width=12, padding=4):
             if line_len > max_len:
                 max_len = line_len
         if max_len > 0:
-            current_w = ws.column_dimensions[col_letter].width
-            calculated_w = max(max_len + padding, min_width)
-            if not current_w or calculated_w > current_w:
-                ws.column_dimensions[col_letter].width = calculated_w
+            calculated_w = max(max_len + 6, 18)
+            ws.column_dimensions[col_letter].width = min(calculated_w, 55)
+
+    # Second pass: set row heights, alignment, borders
+    for row in ws.iter_rows():
+        if not any(cell.value is not None and str(cell.value).strip() != "" for cell in row):
+            continue
+
+        row_num = row[0].row
+
+        # Calculate a good row height based on longest cell content
+        max_lines = 1
+        for cell in row:
+            if cell.value is not None:
+                val = str(cell.value)
+                col_letter = get_column_letter(cell.column)
+                col_width = ws.column_dimensions[col_letter].width or 18
+                char_per_line = max(int(col_width * 1.2), 10)
+                wrapped_lines = max(
+                    len(val) // char_per_line + 1,
+                    val.count("\n") + 1
+                )
+                if wrapped_lines > max_lines:
+                    max_lines = wrapped_lines
+
+        row_height = max(24, min(max_lines * 18, 120))
+        ws.row_dimensions[row_num].height = row_height
+
+        for cell in row:
+            if cell.value is not None and str(cell.value).strip() != "":
+                existing_h = cell.alignment.horizontal if cell.alignment else None
+                cell.alignment = Alignment(
+                    horizontal=existing_h if existing_h and existing_h != "general" else "left",
+                    vertical="center",
+                    wrap_text=True
+                )
+                if not cell.border or not cell.border.left.style:
+                    cell.border = thin_border
+
 
 
 def parse_odf_styles(doc):
@@ -480,7 +523,7 @@ def _convert_with_python(input_path, output_path):
                 row_idx += 1
 
         try:
-            auto_fit_column_widths(ws)
+            format_worksheet_layout(ws)
         except Exception:
             pass
 
@@ -592,7 +635,7 @@ def store_signature(
     )
 
     for sheet in wb.worksheets:
-        auto_fit_column_widths(sheet)
+        format_worksheet_layout(sheet)
 
     wb.save(file_path)
 
