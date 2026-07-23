@@ -337,11 +337,25 @@ def format_worksheet_layout(ws):
         bottom=Side(style="thin", color="D0D0D0")
     )
 
+    # Collect all slave (non-anchor) cells that belong to a merged region.
+    # We must NOT write individual alignment/border to these cells because
+    # doing so would break the visual merge in LibreOffice / Excel.
+    merged_slave_coords = set()
+    for merged_range in ws.merged_cells.ranges:
+        for row_idx in range(merged_range.min_row, merged_range.max_row + 1):
+            for col_idx in range(merged_range.min_col, merged_range.max_col + 1):
+                # Skip the top-left anchor cell; only mark the slaves
+                if row_idx == merged_range.min_row and col_idx == merged_range.min_col:
+                    continue
+                merged_slave_coords.add((row_idx, col_idx))
+
     # First pass: set column widths
     for col in ws.columns:
         max_len = 0
         col_letter = get_column_letter(col[0].column)
         for cell in col:
+            if (cell.row, cell.column) in merged_slave_coords:
+                continue
             val = str(cell.value or "")
             if "\n" in val:
                 lines = val.split("\n")
@@ -364,6 +378,8 @@ def format_worksheet_layout(ws):
         # Calculate a good row height based on longest cell content
         max_lines = 1
         for cell in row:
+            if (cell.row, cell.column) in merged_slave_coords:
+                continue
             if cell.value is not None:
                 val = str(cell.value)
                 col_letter = get_column_letter(cell.column)
@@ -380,6 +396,9 @@ def format_worksheet_layout(ws):
         ws.row_dimensions[row_num].height = row_height
 
         for cell in row:
+            # Never touch slave cells of a merged region
+            if (cell.row, cell.column) in merged_slave_coords:
+                continue
             if cell.value is not None and str(cell.value).strip() != "":
                 existing_h = cell.alignment.horizontal if cell.alignment else None
                 cell.alignment = Alignment(
@@ -428,6 +447,38 @@ def parse_odf_styles(doc):
                         style_info["border"] = True
         styles[name] = style_info
     return styles
+
+
+def _copy_ods_merges_to_ws(table, ws):
+    """Read column/row span attributes from every ODS table cell and apply
+    them as merged regions in the given openpyxl worksheet."""
+    from openpyxl.utils import get_column_letter as gcl
+    row_idx = 1
+    for row in table.getElementsByType(TableRow):
+        rows_repeated = int(safe_get_attribute(row, "numberrowsrepeated") or 1)
+        col_idx = 1
+        if hasattr(row, "childNodes"):
+            for child in row.childNodes:
+                tag = getattr(child, "tagName", "")
+                if tag not in ("table:table-cell", "table:covered-table-cell"):
+                    continue
+                cols_repeated = int(safe_get_attribute(child, "numbercolumnsrepeated") or 1)
+                if tag == "table:table-cell":
+                    cols_spanned = int(safe_get_attribute(child, "numbercolumnsspanned") or 1)
+                    rows_spanned = int(safe_get_attribute(child, "numberrowsspanned") or 1)
+                    if cols_spanned > 1 or rows_spanned > 1:
+                        r1, c1 = row_idx, col_idx
+                        r2 = row_idx + rows_spanned - 1
+                        c2 = col_idx + cols_spanned - 1
+                        region = f"{gcl(c1)}{r1}:{gcl(c2)}{r2}"
+                        try:
+                            ws.merge_cells(region)
+                        except Exception:
+                            pass
+                    col_idx += cols_repeated * (int(safe_get_attribute(child, "numbercolumnsspanned") or 1))
+                else:
+                    col_idx += cols_repeated
+        row_idx += rows_repeated
 
 
 def _convert_with_python(input_path, output_path):
@@ -521,6 +572,12 @@ def _convert_with_python(input_path, output_path):
                         pass
 
                 row_idx += 1
+
+        # ── Preserve merged cells from ODS ──────────────────────────────────
+        try:
+            _copy_ods_merges_to_ws(table, ws)
+        except Exception:
+            pass
 
         try:
             format_worksheet_layout(ws)
