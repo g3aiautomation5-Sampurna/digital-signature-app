@@ -28,6 +28,8 @@ from odf import teletype
 
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
+from odf.text import P, LineBreak
+from odf import teletype
 
 
 import re
@@ -166,22 +168,33 @@ def sanitize_sheet_name(name, existing_names):
 
 
 def get_ods_cell_text(cell):
-    try:
-        text = teletype.extractText(cell)
-        if text is not None:
-            text = text.strip()
-        if text:
-            return text
-    except Exception:
-        pass
+    lines = []
 
-    for attr in ["value", "stringvalue", "datevalue", "booleanvalue"]:
-        val = safe_get_attribute(cell, attr)
-        if val is not None and str(val).strip() != "":
-            return str(val).strip()
+    for paragraph in cell.getElementsByType(P):
+        text = ""
+
+        if hasattr(paragraph, "childNodes"):
+            for node in paragraph.childNodes:
+                if getattr(node, "tagName", "") == "text:line-break":
+                    text += "\n"
+                else:
+                    try:
+                        t = teletype.extractText(node)
+                        if t:
+                            text += t
+                    except Exception:
+                        pass
+
+        lines.append(text)
+
+    if lines:
+        return "\n".join(lines)
+
+    value = safe_get_attribute(cell, "value")
+    if value is not None:
+        return str(value)
 
     return ""
-
 
 def load_ods_data(file_path):
     doc = load_ods(file_path)
@@ -523,6 +536,8 @@ def _convert_with_python(input_path, output_path):
 
                         if tag == "table:table-cell":
                             cell_value = get_ods_cell_text(child)
+                            if "\n" in cell_value:
+                                print(repr(cell_value))
                             style_name = safe_get_attribute(child, "stylename")
                             style_info = styles.get(style_name, {}) if style_name else {}
                         else:
@@ -543,6 +558,9 @@ def _convert_with_python(input_path, output_path):
             for _ in range(row_repeat):
                 for col_idx, (val, st_info) in enumerate(cells_data, 1):
                     c = ws.cell(row=row_idx, column=col_idx)
+                    if isinstance(val, str):
+                        val = val.replace("\r\n", "\n").replace("\r", "\n")
+
                     c.value = val
 
                     try:
