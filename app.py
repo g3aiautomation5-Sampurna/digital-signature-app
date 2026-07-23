@@ -167,28 +167,25 @@ def sanitize_sheet_name(name, existing_names):
     return name
 
 
+from odf.text import P, LineBreak
+from odf import teletype
+
+
 def get_ods_cell_text(cell):
-    lines = []
+    paragraphs = []
 
-    for paragraph in cell.getElementsByType(P):
-        text = ""
+    for p in cell.getElementsByType(P):
 
-        if hasattr(paragraph, "childNodes"):
-            for node in paragraph.childNodes:
-                if getattr(node, "tagName", "") == "text:line-break":
-                    text += "\n"
-                else:
-                    try:
-                        t = teletype.extractText(node)
-                        if t:
-                            text += t
-                    except Exception:
-                        pass
+        # Extract the whole paragraph
+        txt = teletype.extractText(p)
 
-        lines.append(text)
+        if txt is None:
+            txt = ""
 
-    if lines:
-        return "\n".join(lines)
+        paragraphs.append(txt)
+
+    if paragraphs:
+        return "\n".join(paragraphs)
 
     value = safe_get_attribute(cell, "value")
     if value is not None:
