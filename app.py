@@ -617,7 +617,7 @@ def load_spreadsheet_data(file_path):
         ws = wb[sheet_name]
         rows = []
 
-        for row in ws.iter_rows():
+        for row in ws.iter_rows(min_row=1, min_col=1):
             rows.append([cell.value for cell in row])
 
         data[sheet_name] = rows
