@@ -339,6 +339,53 @@ def convert_ods_to_xlsx(input_path, output_path):
         ) from exc
 
 
+def fix_strict_open_xml(file_path):
+    """
+    Checks if an xlsx file is Strict Open XML by checking the namespaces.
+    If it is, replaces the Strict namespaces with standard ones so openpyxl can read it.
+    """
+    try:
+        is_strict = False
+        with zipfile.ZipFile(file_path, 'r') as zin:
+            for item in zin.infolist():
+                if item.filename == "[Content_Types].xml" or item.filename.endswith(".rels"):
+                    content = zin.read(item.filename)
+                    if b"http://purl.oclc.org/ooxml/" in content:
+                        is_strict = True
+                        break
+                        
+        if not is_strict:
+            return
+
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".xlsx")
+        os.close(temp_fd)
+        
+        replacements = [
+            (b"http://purl.oclc.org/ooxml/spreadsheetml/main", b"http://schemas.openxmlformats.org/spreadsheetml/2006/main"),
+            (b"http://purl.oclc.org/ooxml/officeDocument/relationships", b"http://schemas.openxmlformats.org/officeDocument/2006/relationships"),
+            (b"http://purl.oclc.org/ooxml/officeDocument/extended-properties", b"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"),
+            (b"http://purl.oclc.org/ooxml/officeDocument/docPropsVTypes", b"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"),
+            (b"http://purl.oclc.org/ooxml/officeDocument/sharedTypes", b"http://schemas.openxmlformats.org/officeDocument/2006/sharedTypes"),
+            (b"http://purl.oclc.org/ooxml/officeDocument/custom-properties", b"http://schemas.openxmlformats.org/officeDocument/2006/custom-properties"),
+            (b"http://purl.oclc.org/ooxml/officeDocument/bibliography", b"http://schemas.openxmlformats.org/officeDocument/2006/bibliography"),
+            (b"http://purl.oclc.org/ooxml/officeDocument/customXml", b"http://schemas.openxmlformats.org/officeDocument/2006/customXml"),
+            (b"http://purl.oclc.org/ooxml/officeDocument/math", b"http://schemas.openxmlformats.org/officeDocument/2006/math")
+        ]
+        
+        with zipfile.ZipFile(file_path, 'r') as zin:
+            with zipfile.ZipFile(temp_path, 'w') as zout:
+                for item in zin.infolist():
+                    content = zin.read(item.filename)
+                    if item.filename.endswith(".xml") or item.filename.endswith(".rels"):
+                        for old, new in replacements:
+                            content = content.replace(old, new)
+                    zout.writestr(item, content)
+                    
+        shutil.move(temp_path, file_path)
+    except Exception as e:
+        pass
+
+
 def format_worksheet_layout(ws):
     thin_border = Border(
         left=Side(style="thin", color="D0D0D0"),
@@ -416,7 +463,7 @@ def format_worksheet_layout(ws):
                     vertical="center",
                     wrap_text=True
                 )
-                if not cell.border or not cell.border.left.style:
+                if not cell.border or getattr(cell.border, "left", None) is None or getattr(cell.border.left, "style", None) is None:
                     cell.border = thin_border
 
 
@@ -618,7 +665,13 @@ def load_spreadsheet_data(file_path):
         rows = []
 
         for row in ws.iter_rows(min_row=1, min_col=1):
-            rows.append([cell.value for cell in row])
+            row_vals = [cell.value for cell in row]
+            while row_vals and (row_vals[-1] is None or str(row_vals[-1]).strip() == ""):
+                row_vals.pop()
+            rows.append(row_vals)
+
+        while rows and len(rows[-1]) == 0:
+            rows.pop()
 
         data[sheet_name] = rows
 
@@ -677,6 +730,16 @@ def sign_hash(hash_value, private_key):
 # STORE SIGNATURE IN EXCEL
 # =========================================================
 
+def normalize_xlsx_in_place(file_path):
+    """
+    Read the workbook with openpyxl and write it back out immediately.
+    This forces all cell values into openpyxl's canonical representation
+    so that a subsequent read produces exactly the same values.
+    """
+    wb = load_workbook(file_path)
+    wb.save(file_path)
+
+
 def store_signature(
     file_path,
     signature_b64,
@@ -706,8 +769,12 @@ def store_signature(
         f"on {current_date}"
     )
 
-    for sheet in wb.worksheets:
-        format_worksheet_layout(sheet)
+    # Only format the new Digital Signature sheet — never touch data sheets
+    # after the hash has been computed.
+    try:
+        format_worksheet_layout(ws)
+    except Exception:
+        pass
 
     wb.save(file_path)
 
@@ -835,6 +902,7 @@ if uploaded_file is not None and uploaded_private_key is not None:
                 pass
     else:
         temp_path = temp_file_path
+        fix_strict_open_xml(temp_path)
 
     try:
 
@@ -864,7 +932,12 @@ if uploaded_file is not None and uploaded_private_key is not None:
             password=None
         )
 
-        # Generate hash
+        # Normalize the xlsx so openpyxl's canonical representation is
+        # on-disk BEFORE we hash. The verifier will read the same file
+        # format, guaranteeing identical hashes.
+        normalize_xlsx_in_place(temp_path)
+
+        # Generate hash from the now-normalized on-disk file
         hash_value = generate_hash_from_excel(
             temp_path
         )
@@ -875,7 +948,7 @@ if uploaded_file is not None and uploaded_private_key is not None:
             private_key
         )
 
-        # Store signature
+        # Store signature (only adds the Digital Signature sheet)
         store_signature(
             temp_path,
             signature_b64,
